@@ -1,33 +1,28 @@
 name: Build Nginx for ARM64
 
 on:
-  workflow_dispatch:    # 手动触发编译
+  workflow_dispatch:
     inputs:
       nginx_version:
         description: 'Nginx 版本号 (留空则自动获取最新稳定版)'
         required: false
         default: ''
         type: string
-  # schedule:            # 可选: 每周定时检查并编译最新版
-  #   - cron: '0 0 * * 0'
 
 jobs:
   build-nginx-arm64:
     name: Build Nginx for ARM64
-    runs-on: ubuntu-24.04-arm    # GitHub 官方 ARM64 运行器
+    runs-on: ubuntu-24.04-arm
     
     steps:
       - name: 获取最新稳定版版本号
         id: get_version
         run: |
-          # 如果用户输入了版本号，则使用输入的版本
           if [ -n "${{ inputs.nginx_version }}" ]; then
             NGINX_VERSION="${{ inputs.nginx_version }}"
             echo "使用手动输入的版本: ${NGINX_VERSION}"
           else
-            # 否则，从 nginx.org 获取最新稳定版版本号
             echo "正在获取 Nginx 最新稳定版本号..."
-            # 下载并解析主页面，提取最新稳定版版本号 (如 1.26.2)
             NGINX_VERSION=$(curl -s https://nginx.org/en/download.html | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+' | head -1)
             if [ -z "$NGINX_VERSION" ]; then
               echo "错误: 无法从官网获取版本号，请手动输入"
@@ -102,10 +97,8 @@ jobs:
           mkdir -p /tmp/nginx-package/var/log/nginx
           mkdir -p /tmp/nginx-package/var/run/nginx
           
-          # 复制二进制文件
           cp /tmp/nginx-install/usr/local/sbin/nginx /tmp/nginx-package/usr/local/sbin/
           
-          # 复制配置文件（生成一个带安全配置的示例）
           cat > /tmp/nginx-package/etc/nginx/nginx.conf << 'EOF'
           user www-data;
           worker_processes auto;
@@ -145,7 +138,6 @@ jobs:
           }
           EOF
           
-          # 创建默认首页
           mkdir -p /tmp/nginx-package/usr/local/nginx/html
           cat > /tmp/nginx-package/usr/local/nginx/html/index.html << 'EOF'
           <!DOCTYPE html>
@@ -160,10 +152,8 @@ jobs:
           </html>
           EOF
           
-          # 复制 mime.types
           cp /tmp/nginx-${{ steps.get_version.outputs.nginx_version }}/conf/mime.types /tmp/nginx-package/etc/nginx/
           
-          # 打包
           cd /tmp
           tar -czf nginx-arm64-${{ steps.get_version.outputs.nginx_version }}-${{ steps.get_version.outputs.build_date }}.tar.gz -C /tmp/nginx-package .
           
@@ -178,11 +168,8 @@ jobs:
         run: |
           cat > /tmp/install-nginx.sh << 'EOF'
           #!/bin/bash
-          # Nginx ARM64 部署脚本
-          
           echo "开始部署 Nginx..."
           
-          # 创建必要的用户和组
           if ! getent group www-data > /dev/null 2>&1; then
               groupadd -r www-data
           fi
@@ -190,16 +177,13 @@ jobs:
               useradd -r -g www-data -s /sbin/nologin -d /usr/local/nginx www-data
           fi
           
-          # 创建目录
           mkdir -p /usr/local/nginx
           mkdir -p /etc/nginx
           mkdir -p /var/log/nginx
           mkdir -p /var/run/nginx
           
-          # 解压文件（假设压缩包在当前目录）
           tar -xzf nginx-*.tar.gz -C /
           
-          # 设置权限
           chown -R www-data:www-data /var/log/nginx
           chown -R www-data:www-data /var/run/nginx
           chmod +x /usr/local/sbin/nginx
