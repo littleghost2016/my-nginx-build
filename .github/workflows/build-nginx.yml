@@ -81,7 +81,7 @@ jobs:
             --with-http_gzip_static_module \
             --with-http_stub_status_module \
             --with-threads \
-            --with-file-aio \
+            --with-file-aio=no \
             --with-cc-opt='-O2 -g -pipe -Wall -Wp,-D_FORTIFY_SOURCE=2 -fexceptions -fstack-protector-strong --param=ssp-buffer-size=4 -grecord-gcc-switches -m64 -mtune=generic'
             
       - name: 编译
