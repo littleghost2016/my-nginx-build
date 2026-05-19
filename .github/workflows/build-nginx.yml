@@ -313,7 +313,7 @@ jobs:
           docker cp nginx-builder-container:/tmp/nginx-install ./nginx-install
           docker rm nginx-builder-container
           
-      - name: 复制配置文件到编译产物
+      - name: 复制配置文件到编译产物并清理
         run: |
           # 复制配置文件
           cp ./configs/systemd/nginx.service ./nginx-install/etc/systemd/system/
@@ -326,9 +326,19 @@ jobs:
           # 替换版本号占位符
           sed -i "s/NGINX_VERSION_PLACEHOLDER/${{ steps.get_version.outputs.nginx_version }}/g" ./nginx-install/usr/share/nginx/html/index.html
           
-          # 创建 nginx 用户和组文件
-          echo "nginx:x:997:995:nginx user:/usr/share/nginx:/sbin/nologin" > ./nginx-install/etc/passwd.nginx
-          echo "nginx:x:995:" > ./nginx-install/etc/group.nginx
+          # 删除不需要的文件
+          rm -f ./nginx-install/etc/group.nginx
+          rm -f ./nginx-install/etc/passwd.nginx
+          rm -f ./nginx-install/usr/html/50x.html 2>/dev/null || true
+          rm -f ./nginx-install/usr/html/index.html 2>/dev/null || true
+          
+          # 删除空的 html 目录（如果存在）
+          rm -rf ./nginx-install/usr/html 2>/dev/null || true
+          
+          # 确保正确的目录结构
+          if [ -d ./nginx-install/usr/local/nginx/html ]; then
+            cp -r ./nginx-install/usr/local/nginx/html/* ./nginx-install/usr/share/nginx/html/ 2>/dev/null || true
+          fi
           
       - name: 验证编译产物
         run: |
@@ -343,10 +353,9 @@ jobs:
           fi
           
           echo ""
-          echo "=== 检查配置文件 ==="
+          echo "=== 检查目录结构 ==="
+          ls -la ./nginx-install/usr/share/nginx/html/
           ls -la ./nginx-install/etc/nginx/
-          ls -la ./nginx-install/etc/systemd/system/
-          ls -la ./nginx-install/etc/logrotate.d/
           
       - name: 准备 RPM 打包文件
         run: |
@@ -365,6 +374,7 @@ jobs:
           
           echo "=== BUILDROOT 验证 ==="
           find $BUILDROOT_DIR -type f -name "nginx" 2>/dev/null | head -5
+          find $BUILDROOT_DIR -type f -name "*.conf" 2>/dev/null | head -5
           
       - name: 创建 RPM SPEC 文件
         run: |
@@ -398,8 +408,8 @@ jobs:
           /etc/systemd/system/nginx.service
           /etc/logrotate.d/nginx
           /usr/share/nginx
-          %dir /var/log/nginx
-          %dir /var/run/nginx
+          /var/log/nginx
+          /var/run/nginx
           
           %post
           # 创建 nginx 用户
@@ -478,7 +488,7 @@ jobs:
           ## 安装
           
           ```bash
-          # 直接安装
+          # 直接安装（麒麟 V10 默认已有依赖）
           sudo rpm -ivh nginx-*.kylin.aarch64.rpm
           
           # 如果提示依赖问题，使用 --nodeps
@@ -490,3 +500,4 @@ jobs:
           
           # 验证
           curl http://localhost
+          /usr/sbin/nginx -v
