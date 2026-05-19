@@ -104,7 +104,7 @@ jobs:
               make install DESTDIR=/tmp/nginx-install
           
           RUN mkdir -p /tmp/nginx-install/etc/systemd/system
-          RUN cat > /tmp/nginx-install/etc/systemd/system/nginx.service << 'EOF2'
+          RUN cat > /tmp/nginx-install/etc/systemd/system/nginx.service << 'SERVICE'
           [Unit]
           Description=Nginx HTTP Server
           After=network.target remote-fs.target nss-lookup.target
@@ -120,10 +120,10 @@ jobs:
           
           [Install]
           WantedBy=multi-user.target
-          EOF2
+          SERVICE
           
           RUN mkdir -p /tmp/nginx-install/etc/logrotate.d
-          RUN cat > /tmp/nginx-install/etc/logrotate.d/nginx << 'EOF2'
+          RUN cat > /tmp/nginx-install/etc/logrotate.d/nginx << 'LOGROTATE'
           /var/log/nginx/*.log {
               daily
               missingok
@@ -139,10 +139,10 @@ jobs:
                   fi
               endscript
           }
-          EOF2
+          LOGROTATE
           
           RUN mkdir -p /tmp/nginx-install/etc/nginx
-          RUN cat > /tmp/nginx-install/etc/nginx/nginx.conf << 'EOF2'
+          RUN cat > /tmp/nginx-install/etc/nginx/nginx.conf << 'NGINX_CONF'
           user nginx;
           worker_processes auto;
           error_log /var/log/nginx/error.log warn;
@@ -196,10 +196,10 @@ jobs:
                   }
               }
           }
-          EOF2
+          NGINX_CONF
           
           RUN mkdir -p /tmp/nginx-install/etc/nginx
-          RUN cat > /tmp/nginx-install/etc/nginx/mime.types << 'EOF2'
+          RUN cat > /tmp/nginx-install/etc/nginx/mime.types << 'MIME_TYPES'
           types {
               text/html                             html htm shtml;
               text/css                              css;
@@ -220,10 +220,10 @@ jobs:
               application/pdf                       pdf;
               application/zip                       zip;
           }
-          EOF2
+          MIME_TYPES
           
           RUN mkdir -p /tmp/nginx-install/usr/share/nginx/html
-          RUN cat > /tmp/nginx-install/usr/share/nginx/html/index.html << 'EOF2'
+          RUN cat > /tmp/nginx-install/usr/share/nginx/html/index.html << 'INDEX_HTML'
           <!DOCTYPE html>
           <html>
           <head>
@@ -272,17 +272,17 @@ jobs:
               </div>
           </body>
           </html>
-          EOF2
+          INDEX_HTML
           
           RUN mkdir -p /tmp/nginx-install/etc/nginx/conf.d
-          RUN cat > /tmp/nginx-install/etc/nginx/conf.d/default.conf << 'EOF2'
+          RUN cat > /tmp/nginx-install/etc/nginx/conf.d/default.conf << 'DEFAULT_CONF'
           server {
               listen 80;
               server_name _;
               root /usr/share/nginx/html;
               index index.html;
           }
-          EOF2
+          DEFAULT_CONF
           EOF
           
           # 构建 Docker 镜像
@@ -394,12 +394,12 @@ jobs:
           cd ~/rpmbuild
           rpmbuild -bb SPECS/nginx.spec
           
-      - name: 验证 RPM 包
+      - name: 验证并准备 RPM 包
         run: |
           echo "=== 生成的 RPM 包 ==="
           ls -la ~/rpmbuild/RPMS/aarch64/ 2>/dev/null || ls -la ~/rpmbuild/RPMS/
           
-          # 查找 RPM 文件
+          # 查找并复制 RPM 文件
           RPM_FILE=$(find ~/rpmbuild -name "*.rpm" | head -1)
           if [ -n "$RPM_FILE" ]; then
             echo ""
@@ -412,6 +412,12 @@ jobs:
             cp "$RPM_FILE" ./nginx-${{ steps.get_version.outputs.nginx_version }}.aarch64.rpm
           fi
           
+      - name: 创建原始二进制包
+        run: |
+          cd nginx-install
+          tar -czf ../nginx-arm64-${{ steps.get_version.outputs.nginx_version }}-${{ steps.get_version.outputs.build_date }}.tar.gz .
+          cd ..
+          
       - name: 上传 RPM 包
         uses: actions/upload-artifact@v4
         with:
@@ -419,19 +425,14 @@ jobs:
           path: ./nginx-*.aarch64.rpm
           retention-days: 30
           
-      - name: 同时上传原始打包文件（备用）
-        run: |
-          cd nginx-install
-          tar -czf ../nginx-arm64-${{ steps.get_version.outputs.nginx_version }}-${{ steps.get_version.outputs.build_date }}.tar.gz .
-          cd ..
-          
+      - name: 上传原始二进制包
         uses: actions/upload-artifact@v4
         with:
           name: nginx-arm64-binaries-${{ steps.get_version.outputs.nginx_version }}
           path: nginx-arm64-*.tar.gz
           retention-days: 30
           
-      - name: 生成部署说明
+      - name: 生成并上传安装说明
         run: |
           cat > INSTALL.md << 'EOF'
           # Nginx RPM 安装说明
