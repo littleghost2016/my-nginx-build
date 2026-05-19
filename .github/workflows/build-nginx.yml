@@ -1,4 +1,4 @@
-name: Build Nginx RPM for ARM64
+name: Build Nginx RPM for ARM64 (Compatible with Kylin V10)
 
 on:
   workflow_dispatch:
@@ -41,7 +41,6 @@ jobs:
             rpm \
             rpm2cpio \
             cpio \
-            build-essential \
             wget \
             tar \
             curl \
@@ -53,33 +52,36 @@ jobs:
           mkdir -p ~/rpmbuild/BUILDROOT
           echo "%_topdir $HOME/rpmbuild" > ~/.rpmmacros
           
-      - name: 使用 Docker 编译 Nginx
+      - name: 使用 CentOS 7 兼容环境编译 Nginx
         run: |
           cat > Dockerfile << 'EOF'
-          FROM ubuntu:24.04
+          FROM centos:7
           
-          ENV DEBIAN_FRONTEND=noninteractive
-          
-          RUN apt-get update && apt-get install -y \
-              build-essential \
-              gcc \
-              g++ \
-              make \
-              libpcre3 \
-              libpcre3-dev \
-              libssl-dev \
-              zlib1g-dev \
-              wget \
-              tar \
-              curl \
-              ca-certificates \
-              && rm -rf /var/lib/apt/lists/*
+          # 安装开发工具和依赖
+          RUN yum install -y epel-release && \
+              yum groupinstall -y "Development Tools" && \
+              yum install -y \
+                wget \
+                tar \
+                gcc \
+                gcc-c++ \
+                make \
+                pcre \
+                pcre-devel \
+                openssl \
+                openssl-devel \
+                zlib \
+                zlib-devel \
+                ca-certificates \
+                which \
+                && yum clean all
           
           WORKDIR /tmp
           
           ARG NGINX_VERSION
           ENV NGINX_VERSION=${NGINX_VERSION}
           
+          # 下载并编译 Nginx（使用较老的 GLIBC 兼容选项）
           RUN wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
               tar -xzf nginx-${NGINX_VERSION}.tar.gz && \
               cd nginx-${NGINX_VERSION} && \
@@ -98,11 +100,12 @@ jobs:
                 --with-http_gzip_static_module \
                 --with-http_stub_status_module \
                 --with-threads \
-                --with-cc-opt='-O2 -pipe -Wall -fstack-protector-strong' \
+                --with-cc-opt='-O2 -pipe -Wall -fstack-protector-strong -D_GNU_SOURCE' \
                 --with-ld-opt='-Wl,-z,relro,-z,now' && \
               make -j$(nproc) && \
               make install DESTDIR=/tmp/nginx-install
           
+          # 创建 systemd service 文件
           RUN mkdir -p /tmp/nginx-install/etc/systemd/system
           RUN printf '%s\n' \
             '[Unit]' \
@@ -122,6 +125,7 @@ jobs:
             'WantedBy=multi-user.target' \
             > /tmp/nginx-install/etc/systemd/system/nginx.service
           
+          # 创建 logrotate 配置
           RUN mkdir -p /tmp/nginx-install/etc/logrotate.d
           RUN printf '%s\n' \
             '/var/log/nginx/*.log {' \
@@ -141,6 +145,7 @@ jobs:
             '}' \
             > /tmp/nginx-install/etc/logrotate.d/nginx
           
+          # 创建 nginx.conf
           RUN mkdir -p /tmp/nginx-install/etc/nginx
           RUN printf '%s\n' \
             'user nginx;' \
@@ -158,9 +163,9 @@ jobs:
             '    include /etc/nginx/mime.types;' \
             '    default_type application/octet-stream;' \
             '' \
-            '    log_format main '\''$remote_addr - $remote_user [$time_local] "$request" '\'' \
-            '                    '\''$status $body_bytes_sent "$http_referer" '\'' \
-            '                    '\''"$http_user_agent" "$http_x_forwarded_for"'\'';' \
+            '    log_format main '"'"'$remote_addr - $remote_user [$time_local] "$request" '"'"' \
+            '                    '"'"'$status $body_bytes_sent "$http_referer" '"'"' \
+            '                    '"'"'"$http_user_agent" "$http_x_forwarded_for"'"'"';' \
             '' \
             '    access_log /var/log/nginx/access.log main;' \
             '' \
@@ -198,6 +203,7 @@ jobs:
             '}' \
             > /tmp/nginx-install/etc/nginx/nginx.conf
           
+          # 创建 mime.types
           RUN mkdir -p /tmp/nginx-install/etc/nginx
           RUN printf '%s\n' \
             'types {' \
@@ -222,6 +228,7 @@ jobs:
             '}' \
             > /tmp/nginx-install/etc/nginx/mime.types
           
+          # 创建默认首页
           RUN mkdir -p /tmp/nginx-install/usr/share/nginx/html
           RUN printf '%s\n' \
             '<!DOCTYPE html>' \
@@ -266,14 +273,15 @@ jobs:
             '        <p>Successfully deployed on ARM64 architecture</p>' \
             '        <div class="version">' \
             '            Version: ${NGINX_VERSION}<br>' \
-            '            Package: RPM for ARM64' \
+            '            Package: RPM for ARM64 (Kylin V10 Compatible)' \
             '        </div>' \
-            '        <p class="success">✨ Built with GitHub Actions</p>' \
+            '        <p class="success">✨ Built with GitHub Actions (CentOS 7 compat)</p>' \
             '    </div>' \
             '</body>' \
             '</html>' \
             > /tmp/nginx-install/usr/share/nginx/html/index.html
           
+          # 创建 conf.d 目录和默认站点
           RUN mkdir -p /tmp/nginx-install/etc/nginx/conf.d
           RUN printf '%s\n' \
             'server {' \
@@ -288,18 +296,24 @@ jobs:
           # 构建 Docker 镜像
           docker build \
             --build-arg NGINX_VERSION=${{ steps.get_version.outputs.nginx_version }} \
-            -t nginx-builder .
+            -t nginx-builder-centos7 .
           
           # 从容器中复制编译产物
-          docker create --name nginx-builder-container nginx-builder
+          docker create --name nginx-builder-container nginx-builder-centos7
           docker cp nginx-builder-container:/tmp/nginx-install ./nginx-install
           docker rm nginx-builder-container
           
-      - name: 验证编译产物
+      - name: 验证编译产物和依赖
         run: |
           if [ -f ./nginx-install/usr/sbin/nginx ]; then
             echo "✓ Nginx 二进制文件存在"
             file ./nginx-install/usr/sbin/nginx
+            echo ""
+            echo "=== 动态库依赖 ==="
+            readelf -d ./nginx-install/usr/sbin/nginx | grep NEEDED || true
+            echo ""
+            echo "=== GLIBC 版本要求 ==="
+            objdump -T ./nginx-install/usr/sbin/nginx | grep GLIBC | sort -u | tail -10 || true
             ./nginx-install/usr/sbin/nginx -v 2>&1 || true
             echo "✓ 编译成功"
           else
@@ -330,7 +344,7 @@ jobs:
           cat > ~/rpmbuild/SPECS/nginx.spec << EOF
           Name:           nginx
           Version:        ${NGINX_VER}
-          Release:        ${RPM_RELEASE}%{?dist}
+          Release:        ${RPM_RELEASE}.kylin
           Summary:        High performance web server
           
           License:        BSD
@@ -345,6 +359,7 @@ jobs:
           %description
           Nginx is a high performance web server and reverse proxy server.
           This package is built for ARM64 architecture with security patches.
+          Compatible with Kylin V10 and CentOS 7/8.
           
           %files
           %defattr(-,root,root)
@@ -386,8 +401,9 @@ jobs:
           
           %changelog
           * $(date +'%a %b %d %Y') GitHub Actions <actions@github.com> - ${NGINX_VER}-${RPM_RELEASE}
-          - Built for ARM64 architecture
+          - Built for ARM64 architecture with CentOS 7 compatibility
           - Includes security fixes for CVE-2026-42945
+          - Compatible with Kylin V10
           EOF
           
       - name: 构建 RPM 包
@@ -410,33 +426,38 @@ jobs:
             echo "=== RPM 包文件列表 ==="
             rpm -qpl "$RPM_FILE" || true
             # 复制到方便上传的位置
-            cp "$RPM_FILE" ./nginx-${{ steps.get_version.outputs.nginx_version }}.aarch64.rpm
+            cp "$RPM_FILE" ./nginx-${{ steps.get_version.outputs.nginx_version }}.kylin.aarch64.rpm
           fi
           
       - name: 创建原始二进制包
         run: |
           cd nginx-install
-          tar -czf ../nginx-arm64-${{ steps.get_version.outputs.nginx_version }}-${{ steps.get_version.outputs.build_date }}.tar.gz .
+          tar -czf ../nginx-arm64-${{ steps.get_version.outputs.nginx_version }}-kylin-compat.tar.gz .
           cd ..
           
       - name: 上传 RPM 包
         uses: actions/upload-artifact@v4
         with:
-          name: nginx-arm64-rpm-${{ steps.get_version.outputs.nginx_version }}
-          path: ./nginx-*.aarch64.rpm
+          name: nginx-kylin-rpm-${{ steps.get_version.outputs.nginx_version }}
+          path: ./nginx-*.kylin.aarch64.rpm
           retention-days: 30
           
       - name: 上传原始二进制包
         uses: actions/upload-artifact@v4
         with:
-          name: nginx-arm64-binaries-${{ steps.get_version.outputs.nginx_version }}
-          path: nginx-arm64-*.tar.gz
+          name: nginx-arm64-binaries-kylin-compat
+          path: nginx-arm64-*-kylin-compat.tar.gz
           retention-days: 30
           
-      - name: 生成并上传安装说明
+      - name: 生成麒麟 V10 安装说明
         run: |
-          cat > INSTALL.md << 'EOF'
-          # Nginx RPM 安装说明
+          cat > INSTALL-KYLIN.md << 'EOF'
+          # Nginx for Kylin V10 ARM64 安装说明
+          
+          ## 系统要求
+          - 麒麟 V10 (Kylin Linux Advanced Server V10) ARM64
+          - CentOS 7/8 ARM64
+          - 其他基于 GLIBC 2.17+ 的 Linux 发行版
           
           ## 安装 RPM 包
           
@@ -445,7 +466,10 @@ jobs:
           sudo yum install -y pcre openssl zlib
           
           # 安装 RPM
-          sudo rpm -ivh nginx-*.aarch64.rpm
+          sudo rpm -ivh nginx-*.kylin.aarch64.rpm
           
           # 升级 RPM
-          sudo rpm -Uvh nginx-*.aarch64.rpm
+          sudo rpm -Uvh nginx-*.kylin.aarch64.rpm
+          
+          # 如果遇到依赖问题，使用 --nodeps（不推荐）
+          # sudo rpm -ivh --nodeps nginx-*.kylin.aarch64.rpm
