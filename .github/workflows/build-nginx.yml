@@ -33,68 +33,62 @@ jobs:
           echo "nginx_version=${NGINX_VERSION}" >> $GITHUB_OUTPUT
           echo "build_date=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_OUTPUT
           
-      - name: 安装编译依赖
+      - name: 使用 Docker 编译 Nginx
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            gcc \
-            g++ \
-            make \
-            libpcre3 \
-            libpcre3-dev \
-            libssl-dev \
-            zlib1g-dev \
-            libaio-dev \
-            libc6-dev \
-            linux-libc-dev \
-            gcc-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu \
-            wget \
-            tar \
-            curl
-            
-      - name: 下载 Nginx 源码
-        run: |
-          cd /tmp
-          echo "正在下载 Nginx ${{ steps.get_version.outputs.nginx_version }} 源码..."
-          wget https://nginx.org/download/nginx-${{ steps.get_version.outputs.nginx_version }}.tar.gz
-          if [ $? -ne 0 ]; then
-            echo "错误: 下载失败，请检查版本号 ${{ steps.get_version.outputs.nginx_version }} 是否正确"
-            exit 1
-          fi
-          tar -xzf nginx-${{ steps.get_version.outputs.nginx_version }}.tar.gz
-          cd nginx-${{ steps.get_version.outputs.nginx_version }}
+          # 创建一个 Dockerfile 用于编译
+          cat > Dockerfile << 'EOF'
+          FROM ubuntu:24.04
           
-      - name: 配置编译选项
-        run: |
-          cd /tmp/nginx-${{ steps.get_version.outputs.nginx_version }}
-          ./configure \
-            --prefix=/usr/local/nginx \
-            --sbin-path=/usr/local/sbin/nginx \
-            --conf-path=/etc/nginx/nginx.conf \
-            --error-log-path=/var/log/nginx/error.log \
-            --http-log-path=/var/log/nginx/access.log \
-            --pid-path=/var/run/nginx.pid \
-            --lock-path=/var/lock/nginx.lock \
-            --user=www-data \
-            --group=www-data \
-            --with-http_ssl_module \
-            --with-http_v2_module \
-            --with-http_gzip_static_module \
-            --with-http_stub_status_module \
-            --with-threads \
-            --with-cc-opt='-O2 -g -pipe -Wall -Wp,-D_FORTIFY_SOURCE=2 -fexceptions -fstack-protector-strong --param=ssp-buffer-size=4 -grecord-gcc-switches -m64 -mtune=generic'
-            
-      - name: 编译
-        run: |
-          cd /tmp/nginx-${{ steps.get_version.outputs.nginx_version }}
-          make -j$(nproc)
+          ENV DEBIAN_FRONTEND=noninteractive
+          ENV NGINX_VERSION=${NGINX_VERSION}
           
-      - name: 安装到临时目录
-        run: |
-          cd /tmp/nginx-${{ steps.get_version.outputs.nginx_version }}
-          make install DESTDIR=/tmp/nginx-install
+          RUN apt-get update && apt-get install -y \
+              build-essential \
+              gcc \
+              g++ \
+              make \
+              libpcre3 \
+              libpcre3-dev \
+              libssl-dev \
+              zlib1g-dev \
+              wget \
+              tar \
+              curl \
+              && rm -rf /var/lib/apt/lists/*
+          
+          WORKDIR /tmp
+          
+          # 下载并编译 Nginx
+          RUN wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
+              tar -xzf nginx-${NGINX_VERSION}.tar.gz && \
+              cd nginx-${NGINX_VERSION} && \
+              ./configure \
+                --prefix=/usr/local/nginx \
+                --sbin-path=/usr/local/sbin/nginx \
+                --conf-path=/etc/nginx/nginx.conf \
+                --error-log-path=/var/log/nginx/error.log \
+                --http-log-path=/var/log/nginx/access.log \
+                --pid-path=/var/run/nginx.pid \
+                --lock-path=/var/lock/nginx.lock \
+                --user=www-data \
+                --group=www-data \
+                --with-http_ssl_module \
+                --with-http_v2_module \
+                --with-http_gzip_static_module \
+                --with-http_stub_status_module \
+                --with-threads \
+                --with-cc-opt='-O2 -g -pipe -Wall -Wp,-D_FORTIFY_SOURCE=2 -fexceptions -fstack-protector-strong --param=ssp-buffer-size=4' && \
+              make -j$(nproc) && \
+              make install DESTDIR=/tmp/nginx-install
+          EOF
+          
+          # 构建 Docker 镜像
+          docker build --build-arg NGINX_VERSION=${{ steps.get_version.outputs.nginx_version }} -t nginx-builder .
+          
+          # 从容器中复制编译产物
+          docker create --name nginx-builder-container nginx-builder
+          docker cp nginx-builder-container:/tmp/nginx-install ./nginx-install
+          docker rm nginx-builder-container
           
       - name: 创建发布包
         run: |
@@ -104,8 +98,10 @@ jobs:
           mkdir -p /tmp/nginx-package/var/log/nginx
           mkdir -p /tmp/nginx-package/var/run/nginx
           
-          cp /tmp/nginx-install/usr/local/sbin/nginx /tmp/nginx-package/usr/local/sbin/
+          # 复制二进制文件
+          cp ./nginx-install/usr/local/sbin/nginx /tmp/nginx-package/usr/local/sbin/
           
+          # 复制配置文件
           cat > /tmp/nginx-package/etc/nginx/nginx.conf << 'EOF'
           user www-data;
           worker_processes auto;
@@ -145,6 +141,7 @@ jobs:
           }
           EOF
           
+          # 创建默认首页
           mkdir -p /tmp/nginx-package/usr/local/nginx/html
           cat > /tmp/nginx-package/usr/local/nginx/html/index.html << 'EOF'
           <!DOCTYPE html>
@@ -154,13 +151,112 @@ jobs:
           </head>
           <body>
               <h1>Welcome to Nginx on ARM64!</h1>
-              <p>Built with GitHub Actions</p>
+              <p>Built with GitHub Actions using Docker</p>
+              <p>Version: ${{ steps.get_version.outputs.nginx_version }}</p>
           </body>
           </html>
           EOF
           
-          cp /tmp/nginx-${{ steps.get_version.outputs.nginx_version }}/conf/mime.types /tmp/nginx-package/etc/nginx/
+          # 复制 mime.types（如果存在）
+          if [ -f ./nginx-install/usr/local/nginx/conf/mime.types ]; then
+            cp ./nginx-install/usr/local/nginx/conf/mime.types /tmp/nginx-package/etc/nginx/
+          else
+            # 创建基本的 mime.types
+            cat > /tmp/nginx-package/etc/nginx/mime.types << 'EOF'
+            types {
+                text/html                             html htm shtml;
+                text/css                              css;
+                text/xml                              xml;
+                image/gif                             gif;
+                image/jpeg                            jpeg jpg;
+                application/javascript                js;
+                application/atom+xml                  atom;
+                application/rss+xml                   rss;
+                text/mathml                           mml;
+                text/plain                            txt;
+                text/vnd.sun.j2me.app-descriptor      jad;
+                text/vnd.wap.wml                      wml;
+                text/x-component                      htc;
+                image/png                             png;
+                image/tiff                            tif tiff;
+                image/vnd.wap.wbmp                    wbmp;
+                image/webp                            webp;
+                image/x-icon                          ico;
+                image/x-jng                           jng;
+                image/x-ms-bmp                        bmp;
+                image/svg+xml                         svg svgz;
+                image/x-jng                           jng;
+                font/woff                             woff;
+                font/woff2                            woff2;
+                application/java-archive              jar war ear;
+                application/json                      json;
+                application/mac-binhex40              hqx;
+                application/msword                    doc;
+                application/pdf                       pdf;
+                application/postscript                ps eps ai;
+                application/rtf                       rtf;
+                application/vnd.apple.mpegurl         m3u8;
+                application/vnd.google-earth.kml+xml  kml;
+                application/vnd.google-earth.kmz      kmz;
+                application/vnd.ms-excel              xls;
+                application/vnd.ms-fontobject         eot;
+                application/vnd.ms-powerpoint         ppt;
+                application/vnd.oasis.opendocument.chart odc;
+                application/vnd.oasis.opendocument.database odb;
+                application/vnd.oasis.opendocument.formula odf;
+                application/vnd.oasis.opendocument.graphics odg;
+                application/vnd.oasis.opendocument.presentation odp;
+                application/vnd.oasis.opendocument.spreadsheet ods;
+                application/vnd.oasis.opendocument.text odt;
+                application/vnd.openxmlformats-officedocument.presentationml.presentation pptx;
+                application/vnd.openxmlformats-officedocument.spreadsheetml.sheet xlsx;
+                application/vnd.openxmlformats-officedocument.wordprocessingml.document docx;
+                application/vnd.wap.wmlc               wmlc;
+                application/x-7z-compressed            7z;
+                application/x-cocoa                     cco;
+                application/x-java-archive-diff        jardiff;
+                application/x-java-jnlp-file           jnlp;
+                application/x-makeself                 run;
+                application/x-perl                      pl pm;
+                application/x-pilot                     prc pdb;
+                application/x-rar-compressed           rar;
+                application/x-redhat-package-manager   rpm;
+                application/x-sea                      sea;
+                application/x-shockwave-flash          swf;
+                application/x-stuffit                   sit;
+                application/x-tcl                       tcl tk;
+                application/x-x509-ca-cert              der pem crt;
+                application/x-xpinstall                 xpi;
+                application/xhtml+xml                   xhtml;
+                application/xspf+xml                    xspf;
+                application/zip                        zip;
+                application/octet-stream                bin exe dll;
+                application/octet-stream                deb;
+                application/octet-stream                dmg;
+                application/octet-stream                iso img;
+                application/octet-stream                msi msp msm;
+                audio/midi                              mid midi kar;
+                audio/mpeg                              mp3;
+                audio/ogg                               ogg;
+                audio/x-m4a                             m4a;
+                audio/x-realaudio                       ra;
+                video/3gpp                              3gpp 3gp;
+                video/mp2t                              ts;
+                video/mp4                               mp4;
+                video/mpeg                              mpeg mpg;
+                video/quicktime                         mov;
+                video/webm                              webm;
+                video/x-flv                             flv;
+                video/x-m4v                             m4v;
+                video/x-mng                             mng;
+                video/x-ms-asf                          asx asf;
+                video/x-ms-wmv                          wmv;
+                video/x-msvideo                         avi;
+            }
+            EOF
+          fi
           
+          # 打包
           cd /tmp
           tar -czf nginx-arm64-${{ steps.get_version.outputs.nginx_version }}-${{ steps.get_version.outputs.build_date }}.tar.gz -C /tmp/nginx-package .
           
@@ -189,7 +285,14 @@ jobs:
           mkdir -p /var/log/nginx
           mkdir -p /var/run/nginx
           
-          tar -xzf nginx-*.tar.gz -C /
+          # 查找并解压 nginx 压缩包
+          NGINX_TAR=$(ls nginx-arm64-*.tar.gz 2>/dev/null | head -1)
+          if [ -n "$NGINX_TAR" ]; then
+              tar -xzf "$NGINX_TAR" -C /
+          else
+              echo "错误: 找不到 nginx 压缩包"
+              exit 1
+          fi
           
           chown -R www-data:www-data /var/log/nginx
           chown -R www-data:www-data /var/run/nginx
@@ -199,6 +302,7 @@ jobs:
           echo "启动命令: /usr/local/sbin/nginx"
           echo "重载配置: /usr/local/sbin/nginx -s reload"
           echo "停止服务: /usr/local/sbin/nginx -s stop"
+          echo "测试配置: /usr/local/sbin/nginx -t"
           EOF
           
           cp /tmp/install-nginx.sh /tmp/nginx-arm64-${{ steps.get_version.outputs.nginx_version }}-${{ steps.get_version.outputs.build_date }}_install.sh
