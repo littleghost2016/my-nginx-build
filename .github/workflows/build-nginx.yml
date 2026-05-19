@@ -59,7 +59,6 @@ jobs:
           mkdir -p ./configs/nginx
           mkdir -p ./configs/html
           
-          # systemd service 文件
           cat > ./configs/systemd/nginx.service << 'EOF'
           [Unit]
           Description=Nginx HTTP Server
@@ -78,7 +77,6 @@ jobs:
           WantedBy=multi-user.target
           EOF
           
-          # logrotate 配置
           cat > ./configs/logrotate/nginx << 'EOF'
           /var/log/nginx/*.log {
               daily
@@ -97,7 +95,6 @@ jobs:
           }
           EOF
           
-          # nginx.conf
           cat > ./configs/nginx/nginx.conf << 'EOF'
           user nginx;
           worker_processes auto;
@@ -154,7 +151,6 @@ jobs:
           }
           EOF
           
-          # mime.types
           cat > ./configs/nginx/mime.types << 'EOF'
           types {
               text/html                             html htm shtml;
@@ -178,7 +174,6 @@ jobs:
           }
           EOF
           
-          # default.conf
           cat > ./configs/nginx/default.conf << 'EOF'
           server {
               listen 80;
@@ -188,7 +183,6 @@ jobs:
           }
           EOF
           
-          # index.html
           cat > ./configs/html/index.html << 'EOF'
           <!DOCTYPE html>
           <html>
@@ -240,14 +234,13 @@ jobs:
           </html>
           EOF
           
-      - name: 使用 PCRE2 编译 Nginx
+      - name: 使用 PCRE2 编译 Nginx（修正参数）
         run: |
           cat > Dockerfile << 'EOF'
           FROM ubuntu:20.04
           
           ENV DEBIAN_FRONTEND=noninteractive
           
-          # 安装编译依赖，使用 libpcre2-dev 替代 libpcre3-dev
           RUN apt-get update && apt-get install -y \
               build-essential \
               gcc \
@@ -269,7 +262,7 @@ jobs:
           ARG NGINX_VERSION
           ENV NGINX_VERSION=${NGINX_VERSION}
           
-          # 下载并编译 Nginx，使用 --with-pcre2 参数
+          # 下载并编译 Nginx，使用 --with-pcre2=/usr 指定路径
           RUN wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
               tar -xzf nginx-${NGINX_VERSION}.tar.gz && \
               cd nginx-${NGINX_VERSION} && \
@@ -288,7 +281,7 @@ jobs:
                 --with-http_gzip_static_module \
                 --with-http_stub_status_module \
                 --with-threads \
-                --with-pcre2 \
+                --with-pcre2=/usr \
                 --with-pcre2-jit \
                 --with-cc-opt='-O2 -pipe -Wall -fstack-protector-strong' \
                 --with-ld-opt='-Wl,-z,relro,-z,now' && \
@@ -323,7 +316,6 @@ jobs:
           
           sed -i "s/NGINX_VERSION_PLACEHOLDER/${{ steps.get_version.outputs.nginx_version }}/g" ./nginx-install/usr/share/nginx/html/index.html
           
-          # 清理不需要的文件
           rm -f ./nginx-install/etc/group.nginx ./nginx-install/etc/passwd.nginx 2>/dev/null || true
           rm -rf ./nginx-install/usr/html 2>/dev/null || true
           
@@ -339,7 +331,7 @@ jobs:
           
           echo ""
           echo "=== PCRE2 依赖检查 ==="
-          readelf -d ./nginx-install/usr/sbin/nginx | grep -i pcre || echo "未找到 PCRE 依赖（说明使用了 PCRE2 静态链接）"
+          ldd ./nginx-install/usr/sbin/nginx | grep pcre || echo "未找到 PCRE 依赖（可能静态链接）"
           
       - name: 准备 RPM 打包文件
         run: |
@@ -368,7 +360,6 @@ jobs:
           
           BuildArch:      aarch64
           
-          # 使用 PCRE2 作为依赖
           Requires:       pcre2 >= 10.30
           Requires:       openssl >= 1.0.2
           Requires:       zlib >= 1.2
@@ -376,7 +367,7 @@ jobs:
           %description
           Nginx is a high performance web server and reverse proxy server.
           This package is built for ARM64 architecture with PCRE2 support.
-          Compatible with Kylin V10.
+          Compatible with Kylin V10 (uses system PCRE2 library).
           
           %files
           %defattr(-,root,root)
@@ -413,7 +404,7 @@ jobs:
           
           %changelog
           * Thu Jan 01 2026 GitHub Actions <actions@github.com> - VERSION_PLACEHOLDER-RELEASE_PLACEHOLDER
-          - Built for ARM64 with PCRE2 (no libpcre.so.3 dependency)
+          - Built for ARM64 with PCRE2 (libpcre2-8.so.0)
           - Includes security fixes for CVE-2026-42945
           SPEC_EOF
           
@@ -456,15 +447,10 @@ jobs:
           cat > INSTALL.md << 'EOF'
           # Nginx for Kylin V10 (PCRE2 版本)
           
-          ## 优势
-          - **无需软链接**：直接使用系统已有的 PCRE2 库
-          - **更安全**：PCRE2 有持续的安全更新
-          - **性能更好**：ARM64 JIT 优化
-          
-          ## 麒麟 V10 安装
+          ## 直接安装（无需软链接）
           
           ```bash
-          # PCRE2 已经在系统中，直接安装
+          # 安装 RPM
           sudo rpm -ivh nginx-*.kylin.pcre2.aarch64.rpm
           
           # 启动服务
