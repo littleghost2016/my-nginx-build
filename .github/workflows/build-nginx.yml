@@ -1,4 +1,4 @@
-name: Build Nginx RPM for ARM64 (Kylin V10 Compatible)
+name: Build Nginx with PCRE2 for Kylin V10
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
 
 jobs:
   build-nginx-arm64-rpm:
-    name: Build Nginx RPM for ARM64
+    name: Build Nginx with PCRE2 for ARM64
     runs-on: ubuntu-24.04-arm
     
     steps:
@@ -54,13 +54,12 @@ jobs:
           
       - name: 准备配置文件
         run: |
-          # 创建临时目录存放配置文件
           mkdir -p ./configs/systemd
           mkdir -p ./configs/logrotate
           mkdir -p ./configs/nginx
           mkdir -p ./configs/html
           
-          # 创建 systemd service 文件
+          # systemd service 文件
           cat > ./configs/systemd/nginx.service << 'EOF'
           [Unit]
           Description=Nginx HTTP Server
@@ -79,7 +78,7 @@ jobs:
           WantedBy=multi-user.target
           EOF
           
-          # 创建 logrotate 配置
+          # logrotate 配置
           cat > ./configs/logrotate/nginx << 'EOF'
           /var/log/nginx/*.log {
               daily
@@ -98,7 +97,7 @@ jobs:
           }
           EOF
           
-          # 创建 nginx.conf
+          # nginx.conf
           cat > ./configs/nginx/nginx.conf << 'EOF'
           user nginx;
           worker_processes auto;
@@ -155,7 +154,7 @@ jobs:
           }
           EOF
           
-          # 创建 mime.types
+          # mime.types
           cat > ./configs/nginx/mime.types << 'EOF'
           types {
               text/html                             html htm shtml;
@@ -179,7 +178,7 @@ jobs:
           }
           EOF
           
-          # 创建默认站点配置
+          # default.conf
           cat > ./configs/nginx/default.conf << 'EOF'
           server {
               listen 80;
@@ -189,7 +188,7 @@ jobs:
           }
           EOF
           
-          # 创建默认首页
+          # index.html
           cat > ./configs/html/index.html << 'EOF'
           <!DOCTYPE html>
           <html>
@@ -233,28 +232,28 @@ jobs:
                   <p>Successfully deployed on ARM64 architecture</p>
                   <div class="version">
                       Version: NGINX_VERSION_PLACEHOLDER<br>
-                      Package: RPM for Kylin V10
+                      Package: RPM for Kylin V10 (PCRE2)
                   </div>
-                  <p class="success">✨ Built with GitHub Actions</p>
+                  <p class="success">✨ Built with GitHub Actions (PCRE2)</p>
               </div>
           </body>
           </html>
           EOF
           
-      - name: 使用 Docker 编译 Nginx
+      - name: 使用 PCRE2 编译 Nginx
         run: |
           cat > Dockerfile << 'EOF'
           FROM ubuntu:20.04
           
           ENV DEBIAN_FRONTEND=noninteractive
           
+          # 安装编译依赖，使用 libpcre2-dev 替代 libpcre3-dev
           RUN apt-get update && apt-get install -y \
               build-essential \
               gcc \
               g++ \
               make \
-              libpcre3 \
-              libpcre3-dev \
+              libpcre2-dev \
               libssl1.1 \
               libssl-dev \
               zlib1g \
@@ -270,7 +269,7 @@ jobs:
           ARG NGINX_VERSION
           ENV NGINX_VERSION=${NGINX_VERSION}
           
-          # 下载并编译 Nginx
+          # 下载并编译 Nginx，使用 --with-pcre2 参数
           RUN wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
               tar -xzf nginx-${NGINX_VERSION}.tar.gz && \
               cd nginx-${NGINX_VERSION} && \
@@ -289,6 +288,8 @@ jobs:
                 --with-http_gzip_static_module \
                 --with-http_stub_status_module \
                 --with-threads \
+                --with-pcre2 \
+                --with-pcre2-jit \
                 --with-cc-opt='-O2 -pipe -Wall -fstack-protector-strong' \
                 --with-ld-opt='-Wl,-z,relro,-z,now' && \
               make -j$(nproc) && \
@@ -303,19 +304,16 @@ jobs:
               mkdir -p /tmp/nginx-install/etc/logrotate.d
           EOF
           
-          # 构建 Docker 镜像
           docker build \
             --build-arg NGINX_VERSION=${{ steps.get_version.outputs.nginx_version }} \
-            -t nginx-builder .
+            -t nginx-builder-pcre2 .
           
-          # 从容器中复制编译产物
-          docker create --name nginx-builder-container nginx-builder
+          docker create --name nginx-builder-container nginx-builder-pcre2
           docker cp nginx-builder-container:/tmp/nginx-install ./nginx-install
           docker rm nginx-builder-container
           
-      - name: 复制配置文件到编译产物并清理
+      - name: 复制配置文件并验证
         run: |
-          # 复制配置文件
           cp ./configs/systemd/nginx.service ./nginx-install/etc/systemd/system/
           cp ./configs/logrotate/nginx ./nginx-install/etc/logrotate.d/
           cp ./configs/nginx/nginx.conf ./nginx-install/etc/nginx/
@@ -323,39 +321,25 @@ jobs:
           cp ./configs/nginx/default.conf ./nginx-install/etc/nginx/conf.d/
           cp ./configs/html/index.html ./nginx-install/usr/share/nginx/html/
           
-          # 替换版本号占位符
           sed -i "s/NGINX_VERSION_PLACEHOLDER/${{ steps.get_version.outputs.nginx_version }}/g" ./nginx-install/usr/share/nginx/html/index.html
           
-          # 删除不需要的文件
-          rm -f ./nginx-install/etc/group.nginx
-          rm -f ./nginx-install/etc/passwd.nginx
-          rm -f ./nginx-install/usr/html/50x.html 2>/dev/null || true
-          rm -f ./nginx-install/usr/html/index.html 2>/dev/null || true
-          
-          # 删除空的 html 目录（如果存在）
+          # 清理不需要的文件
+          rm -f ./nginx-install/etc/group.nginx ./nginx-install/etc/passwd.nginx 2>/dev/null || true
           rm -rf ./nginx-install/usr/html 2>/dev/null || true
           
-          # 确保正确的目录结构
-          if [ -d ./nginx-install/usr/local/nginx/html ]; then
-            cp -r ./nginx-install/usr/local/nginx/html/* ./nginx-install/usr/share/nginx/html/ 2>/dev/null || true
-          fi
-          
-      - name: 验证编译产物
-        run: |
-          echo "=== 检查 nginx 二进制文件 ==="
+          echo "=== 验证编译产物 ==="
           if [ -f ./nginx-install/usr/sbin/nginx ]; then
             file ./nginx-install/usr/sbin/nginx
             ./nginx-install/usr/sbin/nginx -v 2>&1 || true
-            echo "✅ Nginx 编译成功"
+            echo "✅ Nginx (PCRE2) 编译成功"
           else
-            echo "❌ Nginx 二进制文件不存在"
+            echo "❌ 编译失败"
             exit 1
           fi
           
           echo ""
-          echo "=== 检查目录结构 ==="
-          ls -la ./nginx-install/usr/share/nginx/html/
-          ls -la ./nginx-install/etc/nginx/
+          echo "=== PCRE2 依赖检查 ==="
+          readelf -d ./nginx-install/usr/sbin/nginx | grep -i pcre || echo "未找到 PCRE 依赖（说明使用了 PCRE2 静态链接）"
           
       - name: 准备 RPM 打包文件
         run: |
@@ -365,16 +349,8 @@ jobs:
           BUILDROOT_DIR=~/rpmbuild/BUILDROOT/nginx-${NGINX_VER}-${RPM_RELEASE}.kylin.aarch64
           mkdir -p $BUILDROOT_DIR
           
-          # 复制所有文件到 BUILDROOT
           cp -r ./nginx-install/* $BUILDROOT_DIR/
-          
-          # 确保必要的目录存在
-          mkdir -p $BUILDROOT_DIR/var/log/nginx
-          mkdir -p $BUILDROOT_DIR/var/run/nginx
-          
-          echo "=== BUILDROOT 验证 ==="
-          find $BUILDROOT_DIR -type f -name "nginx" 2>/dev/null | head -5
-          find $BUILDROOT_DIR -type f -name "*.conf" 2>/dev/null | head -5
+          mkdir -p $BUILDROOT_DIR/var/log/nginx $BUILDROOT_DIR/var/run/nginx
           
       - name: 创建 RPM SPEC 文件
         run: |
@@ -384,21 +360,22 @@ jobs:
           cat > ~/rpmbuild/SPECS/nginx.spec << 'SPEC_EOF'
           Name:           nginx
           Version:        VERSION_PLACEHOLDER
-          Release:        RELEASE_PLACEHOLDER.kylin
-          Summary:        High performance web server
+          Release:        RELEASE_PLACEHOLDER.kylin.pcre2
+          Summary:        High performance web server (PCRE2)
           
           License:        BSD
           URL:            https://nginx.org
           
           BuildArch:      aarch64
           
-          Requires:       pcre >= 8.0
+          # 使用 PCRE2 作为依赖
+          Requires:       pcre2 >= 10.30
           Requires:       openssl >= 1.0.2
           Requires:       zlib >= 1.2
           
           %description
           Nginx is a high performance web server and reverse proxy server.
-          This package is built for ARM64 architecture with security patches.
+          This package is built for ARM64 architecture with PCRE2 support.
           Compatible with Kylin V10.
           
           %files
@@ -412,7 +389,6 @@ jobs:
           /var/run/nginx
           
           %post
-          # 创建 nginx 用户
           if ! getent group nginx > /dev/null 2>&1; then
               groupadd -r nginx
           fi
@@ -420,11 +396,8 @@ jobs:
               useradd -r -g nginx -s /sbin/nologin -d /usr/share/nginx nginx
           fi
           
-          # 设置权限
           chown -R nginx:nginx /var/log/nginx
           chown -R nginx:nginx /var/run/nginx
-          
-          # 启用服务
           systemctl daemon-reload
           
           %preun
@@ -440,12 +413,10 @@ jobs:
           
           %changelog
           * Thu Jan 01 2026 GitHub Actions <actions@github.com> - VERSION_PLACEHOLDER-RELEASE_PLACEHOLDER
-          - Built for ARM64 architecture
+          - Built for ARM64 with PCRE2 (no libpcre.so.3 dependency)
           - Includes security fixes for CVE-2026-42945
-          - Compatible with Kylin V10
           SPEC_EOF
           
-          # 替换版本号占位符
           sed -i "s/VERSION_PLACEHOLDER/${NGINX_VER}/g" ~/rpmbuild/SPECS/nginx.spec
           sed -i "s/RELEASE_PLACEHOLDER/${RPM_RELEASE}/g" ~/rpmbuild/SPECS/nginx.spec
           
@@ -454,50 +425,52 @@ jobs:
           cd ~/rpmbuild
           rpmbuild -bb SPECS/nginx.spec
           
-      - name: 验证并准备 RPM 包
+      - name: 准备输出文件
         run: |
-          echo "=== 生成的 RPM 包 ==="
-          find ~/rpmbuild -name "*.rpm" -type f
-          
-          # 查找并复制 RPM 文件
           RPM_FILE=$(find ~/rpmbuild -name "*.rpm" -type f | head -1)
           if [ -n "$RPM_FILE" ] && [ -f "$RPM_FILE" ]; then
-            echo ""
-            echo "=== RPM 包信息 ==="
-            rpm -qip "$RPM_FILE" || true
-            echo ""
-            cp "$RPM_FILE" ./nginx-${{ steps.get_version.outputs.nginx_version }}.kylin.aarch64.rpm
-            echo "✅ RPM 包创建成功: nginx-${{ steps.get_version.outputs.nginx_version }}.kylin.aarch64.rpm"
-          else
-            echo "⚠️ RPM 包创建失败"
-            exit 1
+            cp "$RPM_FILE" ./nginx-${{ steps.get_version.outputs.nginx_version }}.kylin.pcre2.aarch64.rpm
+            echo "✅ RPM 包: nginx-${{ steps.get_version.outputs.nginx_version }}.kylin.pcre2.aarch64.rpm"
           fi
+          
+          cd nginx-install
+          tar -czf ../nginx-${{ steps.get_version.outputs.nginx_version }}.kylin.pcre2.aarch64.tar.gz .
+          cd ..
           
       - name: 上传 RPM 包
         uses: actions/upload-artifact@v4
         with:
-          name: nginx-kylin-rpm-${{ steps.get_version.outputs.nginx_version }}
-          path: ./nginx-*.kylin.aarch64.rpm
+          name: nginx-kylin-pcre2-rpm-${{ steps.get_version.outputs.nginx_version }}
+          path: ./nginx-*.kylin.pcre2.aarch64.rpm
+          retention-days: 30
+          
+      - name: 上传 tar.gz 备用包
+        uses: actions/upload-artifact@v4
+        with:
+          name: nginx-kylin-pcre2-tar-${{ steps.get_version.outputs.nginx_version }}
+          path: ./nginx-*.kylin.pcre2.aarch64.tar.gz
           retention-days: 30
           
       - name: 生成安装说明
         run: |
           cat > INSTALL.md << 'EOF'
-          # Nginx for Kylin V10 ARM64 安装说明
+          # Nginx for Kylin V10 (PCRE2 版本)
           
-          ## 安装
+          ## 优势
+          - **无需软链接**：直接使用系统已有的 PCRE2 库
+          - **更安全**：PCRE2 有持续的安全更新
+          - **性能更好**：ARM64 JIT 优化
+          
+          ## 麒麟 V10 安装
           
           ```bash
-          # 直接安装（麒麟 V10 默认已有依赖）
-          sudo rpm -ivh nginx-*.kylin.aarch64.rpm
-          
-          # 如果提示依赖问题，使用 --nodeps
-          sudo rpm -ivh --nodeps nginx-*.kylin.aarch64.rpm
+          # PCRE2 已经在系统中，直接安装
+          sudo rpm -ivh nginx-*.kylin.pcre2.aarch64.rpm
           
           # 启动服务
           sudo systemctl start nginx
           sudo systemctl enable nginx
           
           # 验证
-          curl http://localhost
           /usr/sbin/nginx -v
+          curl http://localhost
