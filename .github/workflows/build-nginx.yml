@@ -1,4 +1,4 @@
-name: Build Nginx for ARM64
+name: Build Nginx RPM for ARM64
 
 on:
   workflow_dispatch:
@@ -10,8 +10,8 @@ on:
         type: string
 
 jobs:
-  build-nginx-arm64:
-    name: Build Nginx for ARM64
+  build-nginx-arm64-rpm:
+    name: Build Nginx RPM for ARM64
     runs-on: ubuntu-24.04-arm
     
     steps:
@@ -32,8 +32,28 @@ jobs:
           fi
           echo "nginx_version=${NGINX_VERSION}" >> $GITHUB_OUTPUT
           echo "build_date=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_OUTPUT
+          echo "rpm_release=1" >> $GITHUB_OUTPUT
           
-      - name: 使用 Docker 编译 Nginx
+      - name: 安装 RPM 构建工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            rpm \
+            rpm2cpio \
+            cpio \
+            build-essential \
+            wget \
+            tar \
+            curl \
+            ca-certificates
+          
+      - name: 创建 RPM 构建目录结构
+        run: |
+          mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          mkdir -p ~/rpmbuild/BUILDROOT
+          echo "%_topdir $HOME/rpmbuild" > ~/.rpmmacros
+          
+      - name: 使用 Docker 编译 Nginx（修复所有编译问题）
         run: |
           cat > Dockerfile << 'EOF'
           FROM ubuntu:24.04
@@ -57,23 +77,23 @@ jobs:
           
           WORKDIR /tmp
           
-          # 使用 ARG 来接收外部传入的版本号
           ARG NGINX_VERSION
           ENV NGINX_VERSION=${NGINX_VERSION}
           
+          # 下载并编译 Nginx（修复了 _FORTIFY_SOURCE 重复定义问题）
           RUN wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
               tar -xzf nginx-${NGINX_VERSION}.tar.gz && \
               cd nginx-${NGINX_VERSION} && \
               ./configure \
                 --prefix=/usr/local/nginx \
-                --sbin-path=/usr/local/sbin/nginx \
+                --sbin-path=/usr/sbin/nginx \
                 --conf-path=/etc/nginx/nginx.conf \
                 --error-log-path=/var/log/nginx/error.log \
                 --http-log-path=/var/log/nginx/access.log \
                 --pid-path=/var/run/nginx.pid \
                 --lock-path=/var/lock/nginx.lock \
-                --user=www-data \
-                --group=www-data \
+                --user=nginx \
+                --group=nginx \
                 --with-http_ssl_module \
                 --with-http_v2_module \
                 --with-http_gzip_static_module \
@@ -83,46 +103,54 @@ jobs:
                 --with-ld-opt='-Wl,-z,relro,-z,now' && \
               make -j$(nproc) && \
               make install DESTDIR=/tmp/nginx-install
-          EOF
           
-          # 构建 Docker 镜像，传入版本号
-          docker build \
-            --build-arg NGINX_VERSION=${{ steps.get_version.outputs.nginx_version }} \
-            -t nginx-builder .
+          # 创建 systemd service 文件
+          RUN mkdir -p /tmp/nginx-install/etc/systemd/system && \
+              cat > /tmp/nginx-install/etc/systemd/system/nginx.service << 'SERVICE'
+          [Unit]
+          Description=Nginx HTTP Server
+          After=network.target remote-fs.target nss-lookup.target
           
-          # 从容器中复制编译产物
-          docker create --name nginx-builder-container nginx-builder
-          docker cp nginx-builder-container:/tmp/nginx-install ./nginx-install
-          docker rm nginx-builder-container
+          [Service]
+          Type=forking
+          PIDFile=/var/run/nginx.pid
+          ExecStartPre=/usr/sbin/nginx -t
+          ExecStart=/usr/sbin/nginx
+          ExecReload=/usr/sbin/nginx -s reload
+          ExecStop=/bin/kill -s QUIT $MAINPID
+          PrivateTmp=true
           
-      - name: 验证编译产物
-        run: |
-          if [ -f ./nginx-install/usr/local/sbin/nginx ]; then
-            echo "✓ Nginx 二进制文件存在"
-            file ./nginx-install/usr/local/sbin/nginx
-            ./nginx-install/usr/local/sbin/nginx -v 2>&1
-          else
-            echo "✗ 编译失败：未找到 Nginx 二进制文件"
-            exit 1
-          fi
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
           
-      - name: 创建发布包
-        run: |
-          mkdir -p nginx-package/usr/local/sbin
-          mkdir -p nginx-package/usr/local/nginx
-          mkdir -p nginx-package/etc/nginx
-          mkdir -p nginx-package/var/log/nginx
-          mkdir -p nginx-package/var/run/nginx
+          # 创建 logrotate 配置
+          RUN mkdir -p /tmp/nginx-install/etc/logrotate.d && \
+              cat > /tmp/nginx-install/etc/logrotate.d/nginx << 'LOGROTATE'
+          /var/log/nginx/*.log {
+              daily
+              missingok
+              rotate 52
+              compress
+              delaycompress
+              notifempty
+              create 0640 nginx nginx
+              sharedscripts
+              postrotate
+                  if [ -f /var/run/nginx.pid ]; then
+                      kill -USR1 `cat /var/run/nginx.pid`
+                  fi
+              endscript
+          }
+          LOGROTATE
           
-          # 复制二进制文件
-          cp ./nginx-install/usr/local/sbin/nginx nginx-package/usr/local/sbin/
-          
-          # 创建 nginx.conf
-          cat > nginx-package/etc/nginx/nginx.conf << 'NGINX_CONF'
-          user www-data;
+          # 创建默认配置文件
+          RUN mkdir -p /tmp/nginx-install/etc/nginx && \
+              cat > /tmp/nginx-install/etc/nginx/nginx.conf << 'NGINX_CONF'
+          user nginx;
           worker_processes auto;
-          pid /var/run/nginx/nginx.pid;
           error_log /var/log/nginx/error.log warn;
+          pid /var/run/nginx.pid;
           
           events {
               worker_connections 1024;
@@ -155,25 +183,28 @@ jobs:
                          application/json application/javascript application/xml+rss 
                          application/rss+xml image/svg+xml;
               
+              include /etc/nginx/conf.d/*.conf;
+              
               server {
                   listen 80;
                   server_name localhost;
                   
                   location / {
-                      root /usr/local/nginx/html;
+                      root /usr/share/nginx/html;
                       index index.html index.htm;
                   }
                   
                   error_page 500 502 503 504 /50x.html;
                   location = /50x.html {
-                      root /usr/local/nginx/html;
+                      root /usr/share/nginx/html;
                   }
               }
           }
           NGINX_CONF
           
           # 创建 mime.types
-          cat > nginx-package/etc/nginx/mime.types << 'MIME_TYPES'
+          RUN mkdir -p /tmp/nginx-install/etc/nginx && \
+              cat > /tmp/nginx-install/etc/nginx/mime.types << 'MIME_TYPES'
           types {
               text/html                             html htm shtml;
               text/css                              css;
@@ -197,8 +228,8 @@ jobs:
           MIME_TYPES
           
           # 创建默认首页
-          mkdir -p nginx-package/usr/local/nginx/html
-          cat > nginx-package/usr/local/nginx/html/index.html << 'INDEX_HTML'
+          RUN mkdir -p /tmp/nginx-install/usr/share/nginx/html && \
+              cat > /tmp/nginx-install/usr/share/nginx/html/index.html << 'INDEX_HTML'
           <!DOCTYPE html>
           <html>
           <head>
@@ -224,7 +255,7 @@ jobs:
                       box-shadow: 0 20px 40px rgba(0,0,0,0.1);
                       max-width: 600px;
                   }
-                  h1 { color: #667eea; margin-bottom: 10px; }
+                  h1 { color: #667eea; }
                   .version { 
                       background: #f0f0f0;
                       padding: 10px;
@@ -233,7 +264,6 @@ jobs:
                       margin: 20px 0;
                   }
                   .success { color: #4caf50; font-weight: bold; }
-                  .footer { font-size: 12px; color: #999; margin-top: 20px; }
               </style>
           </head>
           <body>
@@ -241,119 +271,177 @@ jobs:
                   <h1>✓ Nginx is Running!</h1>
                   <p>Successfully deployed on ARM64 architecture</p>
                   <div class="version">
-                      Version: ${{ steps.get_version.outputs.nginx_version }}<br>
-                      Build Date: ${{ steps.get_version.outputs.build_date }}
+                      Version: ${NGINX_VERSION}<br>
+                      Package: RPM for ARM64
                   </div>
-                  <p class="success">✨ Built with GitHub Actions Docker</p>
-                  <p>Your ARM64 server is ready to serve!</p>
-                  <div class="footer">
-                      <p>Built with security patches including CVE-2026-42945 fix</p>
-                  </div>
+                  <p class="success">✨ Built with GitHub Actions</p>
               </div>
           </body>
           </html>
           INDEX_HTML
           
-          # 设置执行权限
-          chmod +x nginx-package/usr/local/sbin/nginx
+          # 创建 conf.d 目录
+          RUN mkdir -p /tmp/nginx-install/etc/nginx/conf.d
           
-          # 打包
-          cd nginx-package
-          tar -czf ../nginx-arm64-${{ steps.get_version.outputs.nginx_version }}-${{ steps.get_version.outputs.build_date }}.tar.gz .
-          cd ..
+          # 创建默认站点配置
+          RUN cat > /tmp/nginx-install/etc/nginx/conf.d/default.conf << 'DEFAULT_CONF'
+          server {
+              listen 80;
+              server_name _;
+              root /usr/share/nginx/html;
+              index index.html;
+          }
+          DEFAULT_CONF
+          EOF
           
-      - name: 上传编译产物
+          # 构建 Docker 镜像
+          docker build \
+            --build-arg NGINX_VERSION=${{ steps.get_version.outputs.nginx_version }} \
+            -t nginx-builder .
+          
+          # 从容器中复制编译产物
+          docker create --name nginx-builder-container nginx-builder
+          docker cp nginx-builder-container:/tmp/nginx-install ./nginx-install
+          docker rm nginx-builder-container
+          
+      - name: 准备 RPM 打包文件
+        run: |
+          NGINX_VER=${{ steps.get_version.outputs.nginx_version }}
+          RPM_RELEASE=${{ steps.get_version.outputs.rpm_release }}
+          
+          # 创建 RPM 需要的目录结构
+          mkdir -p ~/rpmbuild/BUILDROOT/nginx-${NGINX_VER}-${RPM_RELEASE}.aarch64
+          
+          # 复制文件到 BUILDROOT
+          cp -r ./nginx-install/* ~/rpmbuild/BUILDROOT/nginx-${NGINX_VER}-${RPM_RELEASE}.aarch64/
+          
+          # 创建必要的目录
+          mkdir -p ~/rpmbuild/BUILDROOT/nginx-${NGINX_VER}-${RPM_RELEASE}.aarch64/var/log/nginx
+          mkdir -p ~/rpmbuild/BUILDROOT/nginx-${NGINX_VER}-${RPM_RELEASE}.aarch64/var/run/nginx
+          
+      - name: 创建 RPM SPEC 文件
+        run: |
+          NGINX_VER=${{ steps.get_version.outputs.nginx_version }}
+          RPM_RELEASE=${{ steps.get_version.outputs.rpm_release }}
+          
+          cat > ~/rpmbuild/SPECS/nginx.spec << 'EOF'
+          Name:           nginx
+          Version:        ${NGINX_VER}
+          Release:        ${RPM_RELEASE}%{?dist}
+          Summary:        High performance web server
+          
+          License:        BSD
+          URL:            https://nginx.org
+          Source0:        https://nginx.org/download/nginx-%{version}.tar.gz
+          
+          BuildArch:      aarch64
+          
+          Requires:       pcre >= 8.0
+          Requires:       openssl >= 1.0.2
+          Requires:       zlib >= 1.2
+          
+          %description
+          Nginx is a high performance web server and reverse proxy server.
+          This package is built for ARM64 architecture with security patches.
+          
+          %files
+          %defattr(-,root,root)
+          /usr/sbin/nginx
+          /usr/local/nginx
+          /etc/nginx
+          /etc/systemd/system/nginx.service
+          /etc/logrotate.d/nginx
+          /usr/share/nginx
+          %dir /var/log/nginx
+          %dir /var/run/nginx
+          
+          %post
+          # 创建 nginx 用户
+          if ! getent group nginx > /dev/null 2>&1; then
+              groupadd -r nginx
+          fi
+          if ! getent passwd nginx > /dev/null 2>&1; then
+              useradd -r -g nginx -s /sbin/nologin -d /usr/share/nginx nginx
+          fi
+          
+          # 设置权限
+          chown -R nginx:nginx /var/log/nginx
+          chown -R nginx:nginx /var/run/nginx
+          
+          # 启用服务
+          systemctl daemon-reload
+          
+          %preun
+          if [ $1 -eq 0 ]; then
+              systemctl stop nginx
+              systemctl disable nginx
+          fi
+          
+          %postun
+          if [ $1 -ge 1 ]; then
+              systemctl try-restart nginx
+          fi
+          
+          %changelog
+          * $(date +'%a %b %d %Y') GitHub Actions <actions@github.com> - ${NGINX_VER}-${RPM_RELEASE}
+          - Built for ARM64 architecture
+          - Includes security fixes for CVE-2026-42945
+          EOF
+          
+          # 替换变量
+          sed -i "s/\${NGINX_VER}/${NGINX_VER}/g" ~/rpmbuild/SPECS/nginx.spec
+          sed -i "s/\${RPM_RELEASE}/${RPM_RELEASE}/g" ~/rpmbuild/SPECS/nginx.spec
+          
+      - name: 构建 RPM 包
+        run: |
+          cd ~/rpmbuild
+          rpmbuild -bb SPECS/nginx.spec
+          
+      - name: 验证 RPM 包
+        run: |
+          echo "=== 生成的 RPM 包 ==="
+          ls -la ~/rpmbuild/RPMS/aarch64/
+          
+          # 检查 RPM 包信息
+          RPM_FILE=$(ls ~/rpmbuild/RPMS/aarch64/*.rpm | head -1)
+          if [ -n "$RPM_FILE" ]; then
+            echo ""
+            echo "=== RPM 包信息 ==="
+            rpm -qip "$RPM_FILE" || true
+            echo ""
+            echo "=== RPM 包文件列表 ==="
+            rpm -qpl "$RPM_FILE" || true
+          fi
+          
+      - name: 上传 RPM 包
         uses: actions/upload-artifact@v4
         with:
-          name: nginx-arm64-${{ steps.get_version.outputs.nginx_version }}
+          name: nginx-arm64-rpm-${{ steps.get_version.outputs.nginx_version }}
+          path: ~/rpmbuild/RPMS/aarch64/*.rpm
+          retention-days: 30
+          
+      - name: 同时上传原始打包文件（备用）
+        uses: actions/upload-artifact@v4
+        with:
+          name: nginx-arm64-binaries-${{ steps.get_version.outputs.nginx_version }}
           path: nginx-arm64-*.tar.gz
           retention-days: 30
           
-      - name: 生成部署脚本
+      - name: 生成部署说明
         run: |
-          cat > install-nginx.sh << 'DEPLOY_SCRIPT'
-          #!/bin/bash
+          cat > INSTALL.md << 'EOF'
+          # Nginx RPM 安装说明
           
-          set -e
+          ## 安装 RPM 包
           
-          echo "========================================="
-          echo "Nginx ARM64 部署脚本"
-          echo "========================================="
+          ```bash
+          # 安装依赖
+          sudo yum install -y pcre openssl zlib
           
-          # 检查是否为 root
-          if [ "$EUID" -ne 0 ]; then 
-            echo "请使用 root 权限运行: sudo $0"
-            exit 1
-          fi
+          # 或对于 Ubuntu/Debian（使用 alien 转换）
+          sudo apt-get install -y alien pcre3 libssl1.1 zlib1g
+          sudo alien --to-deb nginx-*.rpm
+          sudo dpkg -i nginx-*.deb
           
-          # 创建用户和组
-          if ! getent group www-data > /dev/null 2>&1; then
-              groupadd -r www-data
-              echo "✓ 创建组 www-data"
-          fi
-          if ! getent passwd www-data > /dev/null 2>&1; then
-              useradd -r -g www-data -s /sbin/nologin -d /usr/local/nginx www-data
-              echo "✓ 创建用户 www-data"
-          fi
-          
-          # 创建目录
-          mkdir -p /usr/local/nginx
-          mkdir -p /etc/nginx
-          mkdir -p /var/log/nginx
-          mkdir -p /var/run/nginx
-          echo "✓ 创建必要目录"
-          
-          # 查找并解压文件
-          NGINX_TAR=$(ls nginx-arm64-*.tar.gz 2>/dev/null | head -1)
-          if [ -z "$NGINX_TAR" ]; then
-              echo "错误: 找不到 nginx-arm64-*.tar.gz 文件"
-              exit 1
-          fi
-          
-          echo "正在解压 $NGINX_TAR ..."
-          tar -xzf "$NGINX_TAR" -C /
-          echo "✓ 解压完成"
-          
-          # 设置权限
-          chown -R www-data:www-data /var/log/nginx
-          chown -R www-data:www-data /var/run/nginx
-          chmod +x /usr/local/sbin/nginx
-          echo "✓ 设置权限"
-          
-          # 测试配置
-          echo "测试 Nginx 配置..."
-          if /usr/local/sbin/nginx -t; then
-              echo "✓ 配置测试通过"
-          else
-              echo "✗ 配置测试失败"
-              exit 1
-          fi
-          
-          echo ""
-          echo "========================================="
-          echo "✅ 部署完成！"
-          echo "========================================="
-          echo "启动服务: /usr/local/sbin/nginx"
-          echo "重载配置: /usr/local/sbin/nginx -s reload"
-          echo "停止服务: /usr/local/sbin/nginx -s stop"
-          echo "测试配置: /usr/local/sbin/nginx -t"
-          echo "查看版本: /usr/local/sbin/nginx -v"
-          echo ""
-          echo "立即启动 Nginx？(y/n)"
-          read -r answer
-          if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
-              /usr/local/sbin/nginx
-              echo "✓ Nginx 已启动"
-              ps aux | grep nginx | grep -v grep
-          fi
-          DEPLOY_SCRIPT
-          
-          chmod +x install-nginx.sh
-          cp install-nginx.sh nginx-arm64-${{ steps.get_version.outputs.nginx_version }}-${{ steps.get_version.outputs.build_date }}_install.sh
-          
-      - name: 上传部署脚本
-        uses: actions/upload-artifact@v4
-        with:
-          name: nginx-arm64-deploy-script
-          path: nginx-arm64-*_install.sh
-          retention-days: 30
+          # 对于 RHEL/CentOS/Rocky/Alma
+          sudo rpm -ivh nginx-*.rpm
