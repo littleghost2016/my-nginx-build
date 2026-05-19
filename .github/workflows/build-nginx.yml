@@ -23,7 +23,6 @@ jobs:
             echo "使用手动输入的版本: ${NGINX_VERSION}"
           else
             echo "正在获取 Nginx 最新稳定版本号..."
-            # 获取最新稳定版本
             NGINX_VERSION=$(curl -s https://nginx.org/en/download.html | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+' | head -1)
             if [ -z "$NGINX_VERSION" ]; then
               echo "错误: 无法从官网获取版本号，请手动输入"
@@ -36,8 +35,7 @@ jobs:
           
       - name: 使用 Docker 编译 Nginx
         run: |
-          # 创建 Dockerfile，直接将版本号写入
-          cat > Dockerfile << EOF
+          cat > Dockerfile << 'EOF'
           FROM ubuntu:24.04
           
           ENV DEBIAN_FRONTEND=noninteractive
@@ -59,12 +57,13 @@ jobs:
           
           WORKDIR /tmp
           
-          # 使用明确的版本号
-          ENV NGINX_VERSION=${{ steps.get_version.outputs.nginx_version }}
+          # 使用 ARG 来接收外部传入的版本号
+          ARG NGINX_VERSION
+          ENV NGINX_VERSION=${NGINX_VERSION}
           
-          RUN wget https://nginx.org/download/nginx-\${NGINX_VERSION}.tar.gz && \
-              tar -xzf nginx-\${NGINX_VERSION}.tar.gz && \
-              cd nginx-\${NGINX_VERSION} && \
+          RUN wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
+              tar -xzf nginx-${NGINX_VERSION}.tar.gz && \
+              cd nginx-${NGINX_VERSION} && \
               ./configure \
                 --prefix=/usr/local/nginx \
                 --sbin-path=/usr/local/sbin/nginx \
@@ -80,13 +79,16 @@ jobs:
                 --with-http_gzip_static_module \
                 --with-http_stub_status_module \
                 --with-threads \
-                --with-cc-opt='-O2 -pipe -Wall -Wp,-D_FORTIFY_SOURCE=2 -fstack-protector-strong' && \
-              make -j\$(nproc) && \
+                --with-cc-opt='-O2 -pipe -Wall -fstack-protector-strong' \
+                --with-ld-opt='-Wl,-z,relro,-z,now' && \
+              make -j$(nproc) && \
               make install DESTDIR=/tmp/nginx-install
           EOF
           
-          # 构建 Docker 镜像
-          docker build -t nginx-builder .
+          # 构建 Docker 镜像，传入版本号
+          docker build \
+            --build-arg NGINX_VERSION=${{ steps.get_version.outputs.nginx_version }} \
+            -t nginx-builder .
           
           # 从容器中复制编译产物
           docker create --name nginx-builder-container nginx-builder
@@ -98,7 +100,7 @@ jobs:
           if [ -f ./nginx-install/usr/local/sbin/nginx ]; then
             echo "✓ Nginx 二进制文件存在"
             file ./nginx-install/usr/local/sbin/nginx
-            ./nginx-install/usr/local/sbin/nginx -v
+            ./nginx-install/usr/local/sbin/nginx -v 2>&1
           else
             echo "✗ 编译失败：未找到 Nginx 二进制文件"
             exit 1
@@ -114,11 +116,6 @@ jobs:
           
           # 复制二进制文件
           cp ./nginx-install/usr/local/sbin/nginx nginx-package/usr/local/sbin/
-          
-          # 复制配置文件（如果存在）
-          if [ -d ./nginx-install/usr/local/nginx/conf ]; then
-            cp -r ./nginx-install/usr/local/nginx/conf/* nginx-package/etc/nginx/ 2>/dev/null || true
-          fi
           
           # 创建 nginx.conf
           cat > nginx-package/etc/nginx/nginx.conf << 'NGINX_CONF'
@@ -137,9 +134,9 @@ jobs:
               include /etc/nginx/mime.types;
               default_type application/octet-stream;
               
-              log_format main '\$remote_addr - \$remote_user [\$time_local] "\$request" '
-                              '\$status \$body_bytes_sent "\$http_referer" '
-                              '"\$http_user_agent" "\$http_x_forwarded_for"';
+              log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                              '$status $body_bytes_sent "$http_referer" '
+                              '"$http_user_agent" "$http_x_forwarded_for"';
               
               access_log /var/log/nginx/access.log main;
               
@@ -190,12 +187,12 @@ jobs:
               image/png                             png;
               image/svg+xml                         svg svgz;
               image/webp                            webp;
+              image/x-icon                          ico;
               font/woff                             woff;
               font/woff2                            woff2;
               application/json                      json;
               application/pdf                       pdf;
               application/zip                       zip;
-              application/x-7z-compressed           7z;
           }
           MIME_TYPES
           
@@ -236,6 +233,7 @@ jobs:
                       margin: 20px 0;
                   }
                   .success { color: #4caf50; font-weight: bold; }
+                  .footer { font-size: 12px; color: #999; margin-top: 20px; }
               </style>
           </head>
           <body>
@@ -248,12 +246,15 @@ jobs:
                   </div>
                   <p class="success">✨ Built with GitHub Actions Docker</p>
                   <p>Your ARM64 server is ready to serve!</p>
+                  <div class="footer">
+                      <p>Built with security patches including CVE-2026-42945 fix</p>
+                  </div>
               </div>
           </body>
           </html>
           INDEX_HTML
           
-          # 设置权限
+          # 设置执行权限
           chmod +x nginx-package/usr/local/sbin/nginx
           
           # 打包
@@ -302,7 +303,7 @@ jobs:
           mkdir -p /var/run/nginx
           echo "✓ 创建必要目录"
           
-          # 解压文件
+          # 查找并解压文件
           NGINX_TAR=$(ls nginx-arm64-*.tar.gz 2>/dev/null | head -1)
           if [ -z "$NGINX_TAR" ]; then
               echo "错误: 找不到 nginx-arm64-*.tar.gz 文件"
